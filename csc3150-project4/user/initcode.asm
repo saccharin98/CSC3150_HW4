@@ -33,9 +33,9 @@ exit:
   20:	ff9ff0ef          	jal	ra,18 <exit>
 
 0000000000000024 <init>:
-  24:	696e692f          	0x696e692f
-  28:	0074                	addi	a3,sp,12
-	...
+  24:	696e692f          	.word	0x696e692f
+  28:	           	Address 0x0000000000000028 is out of bounds.
+
 
 000000000000002b <argv>:
 	...
