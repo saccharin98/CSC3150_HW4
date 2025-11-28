@@ -246,13 +246,117 @@ bad:
 uint64
 sys_mmap(void)
 {
-  return 0;
+  uint64 addr;
+  int length, prot, flags, fd, offset;
+  struct proc *p = myproc();
+
+  if(argaddr(0, &addr) < 0 ||
+     argint(1, &length) < 0 ||
+     argint(2, &prot) < 0 ||
+     argint(3, &flags) < 0 ||
+     argint(4, &fd) < 0 ||
+     argint(5, &offset) < 0)
+    return -1;
+
+  if(length <= 0 || (offset % PGSIZE) != 0)
+    return -1;
+
+  if(!((flags & MAP_SHARED) || (flags & MAP_PRIVATE)))
+    return -1;
+  if((flags & MAP_SHARED) && (flags & MAP_PRIVATE))
+    return -1;
+
+  if(fd < 0 || fd >= NOFILE)
+    return -1;
+
+  struct file *f = p->ofile[fd];
+  if(f == 0)
+    return -1;
+
+  if((prot & PROT_READ) && !f->readable)
+    return -1;
+  if((flags & MAP_SHARED) && (prot & PROT_WRITE) && !f->writable)
+    return -1;
+
+  length = PGROUNDUP(length);
+
+  struct vma *v = 0;
+  for(int i = 0; i < VMASIZE; i++){
+    if(!p->vma[i].valid){
+      v = &p->vma[i];
+      break;
+    }
+  }
+
+  if(v == 0)
+    return -1;
+
+  uint64 va = PGROUNDUP(p->sz);
+  p->sz = va + length;
+
+  v->valid = 1;
+  v->addr = va;
+  v->length = length;
+  v->prot = prot;
+  v->flags = flags;
+  v->offset = offset;
+  v->file = filedup(f);
+
+  return va;
 }
 
 // TODO: complete munmap()
 uint64
 sys_munmap(void)
 {
+  uint64 addr;
+  int length;
+  struct proc *p = myproc();
+
+  if(argaddr(0, &addr) < 0 || argint(1, &length) < 0)
+    return -1;
+  if(length <= 0)
+    return -1;
+
+  length = PGROUNDUP(length);
+
+  struct vma *v = 0;
+  for(int i = 0; i < VMASIZE; i++){
+    if(p->vma[i].valid && addr >= p->vma[i].addr &&
+       addr + length <= p->vma[i].addr + p->vma[i].length){
+      v = &p->vma[i];
+      break;
+    }
+  }
+  if(v == 0)
+    return -1;
+
+  uint64 end = addr + length;
+  for(uint64 a = PGROUNDDOWN(addr); a < end; a += PGSIZE){
+    pte_t *pte = walk(p->pagetable, a, 0);
+    if(pte && (*pte & PTE_V)){
+      if((v->flags & MAP_SHARED) && (*pte & PTE_D)){
+        begin_op();
+        ilock(v->file->ip);
+        writei(v->file->ip, 1, a, v->offset + (a - v->addr), PGSIZE);
+        iunlock(v->file->ip);
+        end_op();
+      }
+      uvmunmap(p->pagetable, a, 1, 1);
+    }
+  }
+
+  if(length == v->length){
+    fileclose(v->file);
+    v->valid = 0;
+  } else if(addr == v->addr){
+    v->addr += length;
+    v->offset += length;
+    v->length -= length;
+  } else if(end == v->addr + v->length){
+    v->length -= length;
+  }
+
   return 0;
 }
 

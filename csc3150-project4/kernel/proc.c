@@ -147,6 +147,16 @@ found:
   p->context.ra = (uint64)forkret;
   p->context.sp = p->kstack + PGSIZE;
 
+  for(int i = 0; i < VMASIZE; i++){
+    p->vma[i].valid = 0;
+    p->vma[i].addr = 0;
+    p->vma[i].length = 0;
+    p->vma[i].prot = 0;
+    p->vma[i].flags = 0;
+    p->vma[i].offset = 0;
+    p->vma[i].file = 0;
+  }
+
   return p;
 }
 
@@ -170,6 +180,11 @@ freeproc(struct proc *p)
   p->killed = 0;
   p->xstate = 0;
   p->state = UNUSED;
+  for(int i = 0; i < VMASIZE; i++){
+    if(p->vma[i].valid && p->vma[i].file)
+      fileclose(p->vma[i].file);
+    p->vma[i].valid = 0;
+  }
 }
 
 // Create a user page table for a given process, with no user memory,
@@ -308,6 +323,12 @@ fork(void)
     if(p->ofile[i])
       np->ofile[i] = filedup(p->ofile[i]);
   np->cwd = idup(p->cwd);
+
+  for(i = 0; i < VMASIZE; i++){
+    np->vma[i] = p->vma[i];
+    if(np->vma[i].valid && np->vma[i].file)
+      filedup(np->vma[i].file);
+  }
 
   safestrcpy(np->name, p->name, sizeof(p->name));
 

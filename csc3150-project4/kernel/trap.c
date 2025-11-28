@@ -71,9 +71,50 @@ usertrap(void)
   }
   // TODO: page fault handling
   else if(r_scause() == 13 || r_scause() == 15) {
-    // uint64 va = r_stval();
-    printf("Now, after mmap, we get a page fault\n");
-    goto err;
+    uint64 va = r_stval();
+    uint64 base = PGROUNDDOWN(va);
+    struct vma *v = 0;
+
+    for(int i = 0; i < VMASIZE; i++){
+      if(p->vma[i].valid && va >= p->vma[i].addr && va < p->vma[i].addr + p->vma[i].length){
+        v = &p->vma[i];
+        break;
+      }
+    }
+
+    if(v == 0)
+      goto err;
+
+    char *mem = kalloc();
+    if(mem == 0)
+      goto err;
+    memset(mem, 0, PGSIZE);
+
+    uint64 poff = v->offset + (base - v->addr);
+    int readn = 0;
+    if(v->file && v->prot & PROT_READ){
+      int toread = PGSIZE;
+      if(v->length - (base - v->addr) < PGSIZE)
+        toread = v->length - (base - v->addr);
+      ilock(v->file->ip);
+      readn = readi(v->file->ip, 0, (uint64)mem, poff, toread);
+      iunlock(v->file->ip);
+      if(readn < 0){
+        kfree(mem);
+        goto err;
+      }
+    }
+
+    int perm = PTE_U;
+    if(v->prot & PROT_READ)
+      perm |= PTE_R;
+    if(v->prot & PROT_WRITE)
+      perm |= PTE_W;
+
+    if(mappages(p->pagetable, base, PGSIZE, (uint64)mem, perm) < 0){
+      kfree(mem);
+      goto err;
+    }
   }
   else {
   err:
