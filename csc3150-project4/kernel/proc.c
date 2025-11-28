@@ -147,6 +147,17 @@ found:
   p->context.ra = (uint64)forkret;
   p->context.sp = p->kstack + PGSIZE;
 
+  // initialize vma table
+  for(int i = 0; i < VMASIZE; i++){
+    p->vma[i].used = 0;
+    p->vma[i].addr = 0;
+    p->vma[i].len = 0;
+    p->vma[i].prot = 0;
+    p->vma[i].flags = 0;
+    p->vma[i].file = 0;
+    p->vma[i].offset = 0;
+  }
+
   return p;
 }
 
@@ -156,6 +167,8 @@ found:
 static void
 freeproc(struct proc *p)
 {
+  extern void proc_munmap_all(struct proc *p);
+  proc_munmap_all(p);
   if(p->trapframe)
     kfree((void*)p->trapframe);
   p->trapframe = 0;
@@ -296,6 +309,43 @@ fork(void)
     return -1;
   }
   np->sz = p->sz;
+
+  // copy vma metadata
+  for(i = 0; i < VMASIZE; i++){
+    if(p->vma[i].used){
+      np->vma[i] = p->vma[i];
+      if(p->vma[i].file)
+        np->vma[i].file = filedup(p->vma[i].file);
+      // copy mapped pages beyond the normal sz boundary
+      uint64 start = p->vma[i].addr;
+      uint64 end = start + p->vma[i].len;
+      for(uint64 a = start; a < end; a += PGSIZE){
+        uint64 pa = walkaddr(p->pagetable, a);
+        if(pa == 0)
+          continue;
+        char *mem = kalloc();
+        if(mem == 0){
+          freeproc(np);
+          release(&np->lock);
+          return -1;
+        }
+        memmove(mem, (void *)pa, PGSIZE);
+        pte_t *pte = walk(p->pagetable, a, 0);
+        int perm = PTE_U;
+        if(pte && (*pte & PTE_R)) perm |= PTE_R;
+        if(pte && (*pte & PTE_W)) perm |= PTE_W;
+        if(pte && (*pte & PTE_X)) perm |= PTE_X;
+        if(mappages(np->pagetable, a, PGSIZE, (uint64)mem, perm) != 0){
+          kfree(mem);
+          freeproc(np);
+          release(&np->lock);
+          return -1;
+        }
+      }
+    } else {
+      np->vma[i].used = 0;
+    }
+  }
 
   // copy saved user registers.
   *(np->trapframe) = *(p->trapframe);

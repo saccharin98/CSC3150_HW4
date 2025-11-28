@@ -11,6 +11,7 @@
 #include "stat.h"
 #include "spinlock.h"
 #include "proc.h"
+#include "memlayout.h"
 #include "fs.h"
 #include "sleeplock.h"
 #include "file.h"
@@ -246,14 +247,177 @@ bad:
 uint64
 sys_mmap(void)
 {
-  return 0;
+  uint64 addr;
+  int length, prot, flags, fd, offset;
+  struct proc *p = myproc();
+
+  if(argaddr(0, &addr) < 0 || argint(1, &length) < 0 ||
+     argint(2, &prot) < 0 || argint(3, &flags) < 0 ||
+     argint(4, &fd) < 0 || argint(5, &offset) < 0)
+    return -1;
+
+  if(length <= 0)
+    return (uint64)-1;
+
+  if(fd < 0 || fd >= NOFILE || p->ofile[fd] == 0)
+    return (uint64)-1;
+
+  struct file *f = p->ofile[fd];
+  if(f->type != FD_INODE)
+    return (uint64)-1;
+
+  if((flags & MAP_SHARED) && (prot & PROT_WRITE) && f->writable == 0)
+    return (uint64)-1;
+
+  int idx = -1;
+  for(int i = 0; i < VMASIZE; i++){
+    if(p->vma[i].used == 0){
+      idx = i;
+      break;
+    }
+  }
+  if(idx < 0)
+    return (uint64)-1;
+
+  uint64 len = PGROUNDUP(length);
+  if(addr == 0){
+    addr = PGROUNDUP(p->sz);
+    for(int i = 0; i < VMASIZE; i++){
+      if(p->vma[i].used){
+        uint64 end = p->vma[i].addr + p->vma[i].len;
+        if(end > addr)
+          addr = PGROUNDUP(end);
+      }
+    }
+  } else {
+    addr = PGROUNDUP(addr);
+  }
+
+  if(addr + len >= TRAPFRAME)
+    return (uint64)-1;
+
+  int perm = PTE_U;
+  if(prot & PROT_READ)
+    perm |= PTE_R;
+  if(prot & PROT_WRITE)
+    perm |= PTE_W;
+
+  uint64 cur = addr;
+  for(uint64 off = 0; off < len; off += PGSIZE, cur += PGSIZE){
+    char *mem = kalloc();
+    if(mem == 0)
+      goto bad;
+    memset(mem, 0, PGSIZE);
+    if(prot & PROT_READ)
+      mapfile(f, mem, offset + off);
+    if(mappages(p->pagetable, cur, PGSIZE, (uint64)mem, perm) != 0){
+      kfree(mem);
+      goto bad;
+    }
+  }
+
+  p->vma[idx].used = 1;
+  p->vma[idx].addr = addr;
+  p->vma[idx].len = len;
+  p->vma[idx].prot = prot;
+  p->vma[idx].flags = flags;
+  p->vma[idx].file = filedup(f);
+  p->vma[idx].offset = offset;
+
+  return addr;
+
+bad:
+  uvmunmap(p->pagetable, addr, (cur - addr)/PGSIZE, 1);
+  return (uint64)-1;
 }
 
 // TODO: complete munmap()
 uint64
 sys_munmap(void)
 {
-  return 0;
+  uint64 addr;
+  int length;
+  struct proc *p = myproc();
+
+  if(argaddr(0, &addr) < 0 || argint(1, &length) < 0)
+    return -1;
+
+  uint64 len = PGROUNDUP(length);
+  for(int i = 0; i < VMASIZE; i++){
+    struct vma *v = &p->vma[i];
+    if(v->used && addr >= v->addr && addr < v->addr + v->len){
+      if(addr + len > v->addr + v->len)
+        return -1;
+
+      if((v->flags & MAP_SHARED) && (v->prot & PROT_WRITE)){
+        begin_op();
+        ilock(v->file->ip);
+        for(uint64 off = 0, a = addr; off < len; off += PGSIZE, a += PGSIZE){
+          uint64 pa = walkaddr(p->pagetable, a);
+          if(pa){
+            int n = PGSIZE;
+            uint foff = v->offset + (a - v->addr);
+            if(foff + n > v->file->ip->size)
+              n = v->file->ip->size - foff;
+            if(n > 0)
+              writei(v->file->ip, 1, pa, foff, n);
+          }
+        }
+        iunlock(v->file->ip);
+        end_op();
+      }
+
+      uvmunmap(p->pagetable, addr, len/PGSIZE, 1);
+
+      if(len == v->len){
+        fileclose(v->file);
+        v->used = 0;
+      } else if(addr == v->addr){
+        v->addr += len;
+        v->offset += len;
+        v->len -= len;
+      } else if(addr + len == v->addr + v->len){
+        v->len -= len;
+      }
+
+      return 0;
+    }
+  }
+
+  return -1;
+}
+
+// unmap all vma entries for a process (used during freeproc)
+void
+proc_munmap_all(struct proc *p)
+{
+  for(int i = 0; i < VMASIZE; i++){
+    if(p->vma[i].used){
+      uint64 addr = p->vma[i].addr;
+      uint64 len = p->vma[i].len;
+      p->vma[i].used = 0;
+      if((p->vma[i].flags & MAP_SHARED) && (p->vma[i].prot & PROT_WRITE)){
+        begin_op();
+        ilock(p->vma[i].file->ip);
+        for(uint64 off = 0, a = addr; off < len; off += PGSIZE, a += PGSIZE){
+          uint64 pa = walkaddr(p->pagetable, a);
+          if(pa){
+            int n = PGSIZE;
+            uint foff = p->vma[i].offset + (a - addr);
+            if(foff + n > p->vma[i].file->ip->size)
+              n = p->vma[i].file->ip->size - foff;
+            if(n > 0)
+              writei(p->vma[i].file->ip, 1, pa, foff, n);
+          }
+        }
+        iunlock(p->vma[i].file->ip);
+        end_op();
+      }
+      uvmunmap(p->pagetable, addr, len/PGSIZE, 1);
+      if(p->vma[i].file)
+        fileclose(p->vma[i].file);
+    }
+  }
 }
 
 

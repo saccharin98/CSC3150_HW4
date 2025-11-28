@@ -83,8 +83,15 @@ enum procstate { UNUSED, USED, SLEEPING, RUNNABLE, RUNNING, ZOMBIE };
 
 #define VMASIZE 16
 
-// TODO: complete struct of VMA
+// virtual memory area used by mmap/munmap
 struct vma {
+  int used;               // whether this vma entry is valid
+  uint64 addr;            // start virtual address (page aligned)
+  uint64 len;             // length in bytes (page rounded)
+  int prot;               // PROT_* flags
+  int flags;              // MAP_* flags
+  struct file *file;      // file backing the mapping
+  uint offset;            // offset within the file
 };
 
 // Per-process state
