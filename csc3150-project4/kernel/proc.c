@@ -126,6 +126,9 @@ found:
   p->pid = allocpid();
   p->state = USED;
 
+  for(int i = 0; i < VMASIZE; i++)
+    p->vma[i].used = 0;
+
   // Allocate a trapframe page.
   if((p->trapframe = (struct trapframe *)kalloc()) == 0){
     freeproc(p);
@@ -156,6 +159,13 @@ found:
 static void
 freeproc(struct proc *p)
 {
+  for(int i = 0; i < VMASIZE; i++){
+    if(p->vma[i].used){
+      if(p->vma[i].file)
+        fileclose(p->vma[i].file);
+      p->vma[i].used = 0;
+    }
+  }
   if(p->trapframe)
     kfree((void*)p->trapframe);
   p->trapframe = 0;
@@ -302,6 +312,15 @@ fork(void)
 
   // Cause fork to return 0 in the child.
   np->trapframe->a0 = 0;
+
+  for(i = 0; i < VMASIZE; i++){
+    if(p->vma[i].used){
+      np->vma[i] = p->vma[i];
+      np->vma[i].file = filedup(p->vma[i].file);
+    } else {
+      np->vma[i].used = 0;
+    }
+  }
 
   // increment reference counts on open file descriptors.
   for(i = 0; i < NOFILE; i++)
