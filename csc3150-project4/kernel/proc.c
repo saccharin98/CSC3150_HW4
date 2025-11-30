@@ -5,7 +5,20 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "defs.h"
-#include "fcntl.h"
+#include "elf.h"
+#include "sleeplock.h"
+#include "fs.h"
+#include "file.h"
+
+#ifndef MAP_SHARED
+#define PROT_NONE       0x0
+#define PROT_READ       0x1
+#define PROT_WRITE      0x2
+#define PROT_EXEC       0x4
+#define MAP_SHARED      0x01
+#define MAP_PRIVATE     0x02
+#endif
+
 
 struct cpu cpus[NCPU];
 
@@ -146,7 +159,9 @@ found:
   memset(&p->context, 0, sizeof(p->context));
   p->context.ra = (uint64)forkret;
   p->context.sp = p->kstack + PGSIZE;
-
+  for(int i = 0; i < VMASIZE; i++){
+    p->vma[i].valid = 0;
+  }
   return p;
 }
 
@@ -359,6 +374,27 @@ exit(int status)
       struct file *f = p->ofile[fd];
       fileclose(f);
       p->ofile[fd] = 0;
+    }
+  }
+  for(int i = 0; i < VMASIZE; i++){
+    if(p->vma[i].valid){
+      // Write back if MAP_SHARED
+      if(p->vma[i].flags == MAP_SHARED){
+        begin_op();
+        for(uint64 va = p->vma[i].addr; va < p->vma[i].addr + p->vma[i].length; va += PGSIZE){
+          pte_t *pte = walk(p->pagetable, va, 0);
+          if(pte && (*pte & PTE_V) && (*pte)){
+            uint64 pa = PTE2PA(*pte);
+            uint64 file_offset = p->vma[i].offset + (va - p->vma[i].addr);
+            ilock(p->vma[i].file->ip);
+            writei(p->vma[i].file->ip, 0, pa, file_offset, PGSIZE);
+            iunlock(p->vma[i].file->ip);
+          }
+        }
+        end_op();
+      }
+      fileclose(p->vma[i].file);
+      p->vma[i].valid = 0;
     }
   }
 

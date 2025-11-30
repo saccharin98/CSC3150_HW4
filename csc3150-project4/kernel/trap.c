@@ -6,6 +6,19 @@
 #include "proc.h"
 #include "defs.h"
 #include "fcntl.h"
+#include "fs.h"
+#include "sleeplock.h"
+#include "file.h"
+
+
+#ifndef MAP_SHARED
+#define PROT_NONE       0x0
+#define PROT_READ       0x1
+#define PROT_WRITE      0x2
+#define PROT_EXEC       0x4
+#define MAP_SHARED      0x01
+#define MAP_PRIVATE     0x02
+#endif
 
 struct spinlock tickslock;
 uint ticks;
@@ -71,15 +84,62 @@ usertrap(void)
   }
   // TODO: page fault handling
   else if(r_scause() == 13 || r_scause() == 15) {
-    // uint64 va = r_stval();
-    printf("Now, after mmap, we get a page fault\n");
-    goto err;
+    uint64 va = r_stval();
+    
+    // Find the VMA containing this faulting address
+    int i;
+    for(i = 0; i < VMASIZE; i++){
+      if(p->vma[i].valid && p->vma[i].addr <= va && 
+        va < p->vma[i].addr + p->vma[i].length)
+        break;
+    }
+    
+    if(i == VMASIZE){
+      // Address not in any VMA
+      printf("usertrap(): page fault not in VMA, scause %p pid=%d\n", r_scause(), p->pid);
+      printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
+      setkilled(p);
+      goto err_end;
+    }
+    
+    struct vma *v = &p->vma[i];
+    
+    // Allocate physical memory
+    char *mem = kalloc();
+    if(mem == 0){
+      // Out of memory
+      setkilled(p);
+      goto err_end;
+    }
+    
+    memset(mem, 0, PGSIZE);
+    
+    // Read file content into memory
+    uint64 page_offset = PGROUNDDOWN(va) - v->addr;
+    uint64 file_offset = v->offset + page_offset;
+    mapfile(v->file, mem, file_offset);
+    
+    // Set up page permissions
+    int perm = PTE_U;
+    if(v->prot & PROT_READ)
+      perm |= PTE_R;
+    if(v->prot & PROT_WRITE)
+      perm |= PTE_W;
+    if(v->prot & PROT_EXEC)
+      perm |= PTE_X;
+    
+    // Map the page into user address space
+    if(mappages(p->pagetable, PGROUNDDOWN(va), PGSIZE, (uint64)mem, perm) != 0){
+      kfree(mem);
+      setkilled(p);
+      goto err_end;
+    }
   }
   else {
-  err:
-    printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
-    printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
-    setkilled(p);
+    err_end:
+      printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
+      printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
+      setkilled(p);
   }
 
   if(killed(p))

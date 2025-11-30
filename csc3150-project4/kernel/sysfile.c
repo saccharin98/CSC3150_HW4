@@ -16,6 +16,16 @@
 #include "file.h"
 #include "fcntl.h"
 
+
+#ifndef MAP_SHARED
+#define PROT_NONE       0x0
+#define PROT_READ       0x1
+#define PROT_WRITE      0x2
+#define PROT_EXEC       0x4
+#define MAP_SHARED      0x01
+#define MAP_PRIVATE     0x02
+#endif
+
 // Fetch the nth word-sized system call argument as a file descriptor
 // and return both the descriptor and the corresponding struct file.
 static int
@@ -246,13 +256,127 @@ bad:
 uint64
 sys_mmap(void)
 {
-  return 0;
+  uint64 addr;
+  uint64 length;
+  int prot;
+  int flags;
+  int fd;
+  uint64 offset;
+  struct file *f;
+  struct proc *p = myproc();
+  
+  // Fetch arguments
+  argaddr(0, &addr);
+  argaddr(1, &length);
+  argint(2, &prot);
+  argint(3, &flags);
+  argfd(4, &fd, &f);
+  argaddr(5, &offset);
+  
+  // Check if addr is 0 (kernel chooses address)
+  if(addr != 0)
+    return -1;
+  
+  // Check if file is writable when MAP_SHARED and PROT_WRITE
+  if(flags == MAP_SHARED && (prot & PROT_WRITE) && !f->writable)
+    return -1;
+  
+  // Find an unused VMA slot
+  int i;
+  for(i = 0; i < VMASIZE; i++){
+    if(p->vma[i].valid == 0)
+      break;
+  }
+  
+  if(i == VMASIZE)
+    return -1;  // No free VMA slots
+  
+  // Round up length to page size
+  length = PGROUNDUP(length);
+  
+  // Find a free virtual address region
+  uint64 va = PGROUNDUP(p->sz);
+  
+  // Initialize the VMA
+  p->vma[i].valid = 1;
+  p->vma[i].addr = va;
+  p->vma[i].length = length;
+  p->vma[i].prot = prot;
+  p->vma[i].flags = flags;
+  p->vma[i].file = f;
+  p->vma[i].offset = offset;
+  
+  // Increment file reference count
+  filedup(f);
+  
+  // Update process size
+  p->sz = va + length;
+  
+  return va;
 }
 
 // TODO: complete munmap()
 uint64
 sys_munmap(void)
 {
+  uint64 addr;
+  uint64 length;
+  struct proc *p = myproc();
+  
+  // Fetch arguments
+  argaddr(0, &addr);
+  argaddr(1, &length);
+  
+  // Round down addr and round up length
+  addr = PGROUNDDOWN(addr);
+  length = PGROUNDUP(length);
+  
+  // Find the VMA containing this address
+  int i;
+  for(i = 0; i < VMASIZE; i++){
+    if(p->vma[i].valid && p->vma[i].addr <= addr && 
+       addr < p->vma[i].addr + p->vma[i].length)
+      break;
+  }
+  
+  if(i == VMASIZE)
+    return -1;  // Address not found in any VMA
+  
+  struct vma *v = &p->vma[i];
+  
+  // Write back dirty pages if MAP_SHARED
+  if(v->flags == MAP_SHARED){
+    uint64 start = addr;
+    uint64 end = addr + length;
+    begin_op(); 
+    for(uint64 va = start; va < end; va += PGSIZE){
+      pte_t *pte = walk(p->pagetable, va, 0);
+      
+      if(pte && (*pte & PTE_V)){
+        // Check if page is dirty (written to)
+        if(*pte){
+          // Write back to file
+          uint64 pa = PTE2PA(*pte);
+          uint64 file_offset = v->offset + (va - v->addr);
+          
+          ilock(v->file->ip);
+          writei(v->file->ip, 0, pa, file_offset, PGSIZE);
+          iunlock(v->file->ip);
+        }
+      }
+    }
+    end_op(); 
+  }
+  
+  // Unmap the pages
+  uvmunmap(p->pagetable, addr, length / PGSIZE, 1);
+  
+  // If we unmapped the entire VMA, free it
+  if(addr == v->addr && length == v->length){
+    fileclose(v->file);
+    v->valid = 0;
+  }
+  
   return 0;
 }
 

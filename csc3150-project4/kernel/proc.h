@@ -85,6 +85,13 @@ enum procstate { UNUSED, USED, SLEEPING, RUNNABLE, RUNNING, ZOMBIE };
 
 // TODO: complete struct of VMA
 struct vma {
+  int valid;              // whether this VMA slot is used
+  uint64 addr;            // starting virtual address
+  uint64 length;          // length of the mapping
+  int prot;               // protection flags (PROT_READ, PROT_WRITE, etc.)
+  int flags;              // MAP_SHARED or MAP_PRIVATE
+  struct file *file;      // pointer to the mapped file
+  uint64 offset;          // offset in the file
 };
 
 // Per-process state
